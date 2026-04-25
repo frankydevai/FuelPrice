@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 import time
 import os
+import ast
 
 def send_to_telegram(filename):
     # Fetch Telegram credentials from Railway variables
@@ -23,6 +24,64 @@ def send_to_telegram(filename):
         print("Successfully sent to Telegram!")
     else:
         print(f"Failed to send to Telegram. Error: {response.text}")
+
+
+# ==========================================
+# --- CLEANING LOGIC (NO EXTERNAL FILES) ---
+# ==========================================
+
+def extract_from_json_list(val, key):
+    """Helper function to extract specific fields from the messy stringified lists in the CSV."""
+    try:
+        data = ast.literal_eval(str(val))
+        if isinstance(data, list) and len(data) > 0:
+            return data[0].get(key)
+    except:
+        return None
+    return None
+
+def clean_file(input_filename):
+    print(f"Cleaning formatting for {input_filename}...")
+    
+    # Load the raw file your code just generated
+    df_base = pd.read_csv(input_filename)
+    
+    # Extract only the exact columns we need from the nested JSON strings
+    df_base['Station'] = df_base['nameInEfs'].fillna(df_base.get('nameInFile', ''))
+    df_base['Address'] = df_base['addresses'].apply(lambda x: extract_from_json_list(x, 'street'))
+    df_base['City'] = df_base['addresses'].apply(lambda x: extract_from_json_list(x, 'city'))
+    df_base['State'] = df_base['addresses'].apply(lambda x: extract_from_json_list(x, 'state'))
+    df_base['longitude'] = df_base['addresses'].apply(lambda x: extract_from_json_list(x, 'longitude'))
+    df_base['latitude'] = df_base['addresses'].apply(lambda x: extract_from_json_list(x, 'latitude'))
+    df_base['Retail price'] = pd.to_numeric(df_base['fuelPrices'].apply(lambda x: extract_from_json_list(x, 'retailPrice')), errors='coerce')
+    df_base['Discounted price'] = pd.to_numeric(df_base['fuelPrices'].apply(lambda x: extract_from_json_list(x, 'discountedPrice')), errors='coerce')
+
+    # Format the final columns
+    final_cols = ['Station', 'Address', 'City', 'State', 'longitude', 'latitude', 'Retail price', 'Discounted price']
+    df_final = df_base[final_cols].copy()
+
+    # Drop any remaining rows that have absolutely no location data from the API
+    missing_condition = (
+        pd.isna(df_final['Address']) | 
+        (df_final['Address'].astype(str).str.lower() == 'none') | 
+        (df_final['Address'].astype(str).str.strip() == '') |
+        pd.isna(df_final['latitude']) | 
+        pd.isna(df_final['longitude'])
+    )
+
+    df_complete = df_final[~missing_condition].copy()
+
+    # Save cleaned file
+    cleaned_filename = f"fully_cleaned_{input_filename}"
+    df_complete.to_csv(cleaned_filename, index=False)
+    
+    print(f"Cleanup finished! Cleaned file saved as {cleaned_filename}")
+    return cleaned_filename
+
+# ==========================================
+# --------- END CLEANING LOGIC -------------
+# ==========================================
+
 
 def extract_and_save():
     # Fetch login credentials from Railway variables
@@ -90,13 +149,18 @@ def extract_and_save():
             break
 
     if all_stations_data:
+        # 1. Save the raw file
         df = pd.json_normalize(all_stations_data)
         date_str = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        filename = f"fuel_stations_{date_str}.csv"
-        df.to_csv(filename, index=False)
-        print(f"\nSuccess! Saved {len(df)} total rows to {filename}")
+        raw_filename = f"fuel_stations_{date_str}.csv"
+        df.to_csv(raw_filename, index=False)
+        print(f"\nSuccess! Saved {len(df)} total raw rows to {raw_filename}")
         
-        send_to_telegram(filename)
+        # 2. RUN THE CLEANING FUNCTION on the raw file
+        cleaned_filename = clean_file(raw_filename)
+        
+        # 3. Send the CLEANED file to Telegram
+        send_to_telegram(cleaned_filename)
     else:
         print("\nNo data was extracted.")
 
